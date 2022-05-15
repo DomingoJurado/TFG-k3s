@@ -26,7 +26,7 @@ spec:
       volumes:
       - name: homeassistant-volume
         persistentVolumeClaim:
-          claimName: homeassistant-pvc-v1
+          claimName: homeassistant-pvc-longhorn
 ---
 apiVersion: v1
 kind: Service
