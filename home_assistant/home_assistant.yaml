@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homeassistant-dpm
+spec:
+  selector:
+    matchLabels:
+      app: homeassistant-pod
+  template:
+    metadata:
+      labels:
+        app: homeassistant-pod
+    spec:
+      containers:
+      - env:
+        - name: TZ
+          value: "europe/madrid"
+        image: homeassistant/raspberrypi3-homeassistant:stable
+        name: homeassistant
+        ports:
+          - containerPort: 8123
+        volumeMounts:
+          - mountPath: /config
+            name: homeassistant-volume
+      restartPolicy: Always
+      volumes:
+      - name: homeassistant-volume
+        persistentVolumeClaim:
+          claimName: homeassistant-pvc-longhorn
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: homeassistant-svc
+spec:
+  ports:
+    - port: 8123
+      protocol: TCP
+  selector:
+    app: homeassistant-pod
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: homeassistant-ingress
+  annotations:
+    kubernetes.io/ingress.class: "traefik"
+spec:
+  rules:
+  - http:
+      paths:
+        - pathType: Prefix
+          path: /
+          backend:
+            service:
+              name: homeassistant-svc
+              port:
+                number: 8123

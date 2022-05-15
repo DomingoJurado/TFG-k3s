@@ -1,0 +1,310 @@
+-- creating vm's
+    -- keyboard
+        sudo dpkg-reconfigure keyboard-configuration
+    -- disabling password for sudo user  (is needed for k3sup)
+        sudo visudo
+            *add at the end of the file: domus ALL=(ALL) NOPASSWD: ALL
+    -- network
+        * create file to disable cloud-init with: "network: {config: disabled}"
+        sudo vi /etc/cloud/colud.cfg.d/99-disable-network-config.cfg
+        * create a netplan    
+        sudo vi /etc/netplan/00-installer-config.yaml
+
+       network:
+        version: 2
+        renderer: networkd
+        ethernets:
+            ens3:
+            dhcp4: no
+            addresses:
+                - 192.168.121.221/24
+            gateway4: 192.168.121.1
+            nameservers:
+                addresses: [8.8.8.8, 1.1.1.1]
+
+    -- apply network
+
+        sudo netplan apply
+
+    -- allow firewall 
+        sudo ufw allow ssh
+
+    -- updating and upgrade
+        sudo apt update
+        sudo apt upgrade
+
+    -- in ubuntu pi add ssh
+    sudo apt update
+        
+
+
+--install nginx
+sudo apt install nginx
+    -- Adjusting the Firewall
+
+
+-- desactivar el dns
+sudo systemctl disable systemd-resolved
+sudo systemctl stop systemd-resolved
+--
+
+--config nginx -> /etc/nginx/nginx.conf
+load_module /usr/lib/nginx/modules/ngx_stream_module.so;
+
+events {}
+
+stream {
+  upstream k3snodes {
+    least_conn;
+    server 192.168.1.126:6443 max_fails=3 fail_timeout=5s;
+    server 192.168.1.127:6443 max_fails=3 fail_timeout=5s;
+    server 192.168.1.128:6443 max_fails=3 fail_timeout=5s;
+  }
+
+  server {
+    listen 6443;
+    proxy_pass k3snodes;
+  }
+
+  upstream http_k3s_servers{
+    least_conn;
+    server server1:80 max_fails=3 fail_timeout=5s;
+    server server2:80 max_fails=3 fail_timeout=5s;
+    server server3:80 max_fails=3 fail_timeout=5s;
+  }
+  server {
+    listen 80;
+    proxy_pass http_k3s_servers;
+  }
+
+  upstream https_k3s_servers{
+    least_conn;
+    server server1:443 max_fails=3 fail_timeout=5s;
+    server server2:443 max_fails=3 fail_timeout=5s;
+    server server3:443 max_fails=3 fail_timeout=5s;
+  }
+  server {
+    listen 443;
+    proxy_pass https_k3s_servers;
+  }
+} 
+
+https://github.com/k3s-io/k3s/releases/download/v1.23.6+k3s1/k3s
+-- install k3sup on lb
+    curl -sLS https://get.k3sup.dev | sh
+    sudo install k3sup /usr/local/bin/
+
+-- creating ssh keys and copy to lb
+    ssh-keygen -t rsa (* in each server and lb)
+    ssh-copy-id $IP (* form lb with servers ip's)
+
+-- checking access from lb to nodes
+
+    * ssh $IP must enter without promp password
+
+-- install kubectl in lb
+
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+-- installing first master with k3sup from lb
+
+k3sup install --print-command --ip 192.168.1.126 --tls-san 192.168.1.125 --user domus --sudo --cluster --k3s-extra-args="--node-taint node-role.kubernetes.io/master=true:NoSchedule"
+k3sup install --print-command \
+              --host server1 \
+              --tls-san 192.168.1.125 \
+              --user domus --sudo \
+              --cluster \
+              --k3s-extra-args="--node-taint node-role.kubernetes.io/master=true:NoSchedule"
+
+-- Before adding others servers, Copy server1 (master) yaml to lb
+-- we do it from server because file is owned by root and scp promps "permission denied" 
+mkdir .kube
+sudo scp domus@server1:/etc/rancher/k3s/k3s.yaml .kube/config
+exit
+** scp server1:/etc/rancher/k3s/k3s.yaml .kube/config
+
+
+-- we change the local ip and set the loadbalancer so the nginx send de command to the right server
+vi .kube/config
+s
+-- add another server to cluster
+k3sup join --host=192.168.1.127 --server-user=domus --server-host=192.168.1.126 --user=domus --server --k3s-extra-args="--node-taint node-role.kubernetes.io/master=true:NoSchedule"
+k3sup join  --host=server2 \
+            --server-user=domus \
+            --server-host=192.168.1.126 \
+            --user=domus --server \
+            --k3s-extra-args="--node-taint node-role.kubernetes.io/master=true:NoSchedule"
+
+k3sup join --host=192.168.1.128 --server-user=domus --server-host=192.168.1.126 --user=domus --server --k3s-extra-args="--node-taint node-role.kubernetes.io/master=true:NoSchedule"
+
+-- on Raspberry Pi , add cgroup on /boot/firmware/cmdline.txt 
+* add at the end : cgroup_memory=1 cgroup_enable=memory
+* reboot
+
+
+-- add workers to cluster
+k3sup join --host=192.168.1.129 --server-user=domus --server-host=192.168.1.126 --user=domus 
+k3sup join --host=worker2 --server-user=domus --server-host=192.168.1.126 --user=domus 
+k3sup join --host=worker1 --server-user=domus --server-host=192.168.1.126 --user=domus 
+k3sup join --host=192.168.1.130 --server-user=domus --server-host=192.168.1.126 --user=domus 
+
+*check the nodes
+kubectl get nodes 
+
+-- config map creation
+kubectl create configmap hello-world --from-file index.html
+
+-- deploy an application hello-world.yml:
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hello-world
+  annotations:
+    kubernetes.io/ingress.class: "traefik"
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: hello-world
+            port:
+              number: 80
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-world
+spec:
+  ports:
+    - port: 80
+      protocol: TCP
+  selector:
+    app:  hello-world
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-world-nginx
+spec:
+  selector:
+    matchLabels:
+      app: hello-world
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: hello-world
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: hello-world-volume
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: hello-world-volume
+        configMap:
+          name: hello-world
+
+
+-- create a namespace
+kubectl create ns testdeploy
+
+-- apply the deploy file
+kubectl apply -f testdeploy.yaml -n testdeploy
+
+-- delete a deploy
+kubectl delete deployments -n testdeploy mysite
+
+-- delete a namespace
+kubectl delete namespaces testdeploy
+
+-- finalize a stuck namespace
+
+kubectl get namespace "stucked-namespace" -o json \
+  | tr -d "\n" | sed "s/\"finalizers\": \[[^]]\+\]/\"finalizers\": []/" \
+  | kubectl replace --raw /api/v1/namespaces/stucked-namespace/finalize -f -
+
+kubectl get namespace longhorn-system -o json \
+  | tr -d "\n" | sed "s/\"finalizers\": \[[^]]\+\]/\"finalizers\": []/" \
+  | kubectl replace --raw /api/v1/namespaces/longhorn-system/finalize -f -
+
+
+-- delete a node from cluster
+kubectl get nodes
+kubectl drain <node-name>
+kubectl drain <node-name> --ignore-daemonsets --delete-local-data
+kubectl delete node <node-name>
+
+# Hemos escalado el pod
+k3s kubectl scale --replicas=4 deployment/nginx2
+
+kubectl scale --replicas=2 deployment.apps/hello-world-nginx
+
+
+
+etcdctl -C https://server1:2379 --ca-file=/etc/etcd/ca.crt --cert-file=/etc/etcd/peer.crt --key-file=/etc/etcd/peer.key cluster-health # etcdctl -C https://<surviving host IP>:2379 --ca-file=/etc/etcd/ca.crt --cert-file=/etc/etcd/peer.crt --key-file=/etc/etcd/peer.key member list
+
+-- executar una comanda en un contenidor
+kubectl exec -it mysite-66b6986d97-xxg6v curl localhost
+
+-- llista de pods
+kubectl get pods
+kubectl get pods -o wide
+-- descripció d'un pods
+kubectl describe pod
+
+-- logs of a pod
+
+kubectl logs <pod name>
+
+-- Longhorn as distributed block storage system
+--install
+kubectl apply -f https://raw.githubusercontent.com/longhorn/longhorn/master/deploy/longhorn.yaml
+
+-- create a volume for pihole , pivol.yaml:
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: longhorn-vol-pihole
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 2Gi
+
+
+
+---
+/config/configuration.yaml
+# Loads default set of integrations. Do not remove.
+default_config:
+
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+  - 127.0.0.1
+  - 10.42.1.4
+  - 192.168.1.126
+  ip_ban_enabled: true
+  login_attempts_threshold: 5
+
+# Text to speech
+tts:
+  - platform: google_translate
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
